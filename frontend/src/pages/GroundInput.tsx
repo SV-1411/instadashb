@@ -2,7 +2,6 @@ import { useState } from "react";
 import { postGroundInput, type GroundInputResult } from "../lib/api";
 import { usePolitician } from "../lib/PoliticianContext";
 
-// WP11: manual ground-intelligence entry (fills the WhatsApp gap — no API exists).
 export function GroundInput() {
   const { selected } = usePolitician();
   const [text, setText] = useState("");
@@ -10,7 +9,7 @@ export function GroundInput() {
   const [result, setResult] = useState<GroundInputResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  if (!selected) return <p className="text-slate-500">No connected account.</p>;
+  if (!selected) return <p className="text-mocha">No connected account.</p>;
 
   async function submit() {
     if (!text.trim() || !selected) return;
@@ -29,32 +28,34 @@ export function GroundInput() {
   }
 
   return (
-    <div className="max-w-xl space-y-4">
+    <div className="max-w-xl space-y-5">
       <div>
-        <h2 className="text-2xl font-semibold text-ink">Ground Intelligence</h2>
-        <p className="text-slate-500">
+        <h2 className="text-2xl font-extrabold text-ink">Ground Intelligence</h2>
+        <p className="text-coffee/70">
           Log what your team hears on the ground (WhatsApp, door-to-door, local press). It flows
           through the same sentiment, topic and geo pipeline as social mentions.
         </p>
       </div>
 
-      <textarea
-        className="h-32 w-full rounded-lg border border-slate-300 p-3 text-sm"
-        placeholder="e.g. Angry crowd about water shortage in Pune ward 12 today"
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-      />
-      <button
-        onClick={submit}
-        disabled={busy || !text.trim()}
-        className="rounded-lg bg-pulse px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-      >
-        {busy ? "Saving…" : "Add ground report"}
-      </button>
+      <div className="glass-card sheen p-4">
+        <textarea
+          className="h-32 w-full rounded-xl border border-white/50 bg-white/40 p-3 text-sm text-ink outline-none placeholder:text-mocha/70 focus:bg-white/60"
+          placeholder="e.g. Angry crowd about water shortage in Pune ward 12 today"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+        />
+        <button
+          onClick={submit}
+          disabled={busy || !text.trim()}
+          className="mt-3 rounded-xl bg-pulse px-4 py-2 text-sm font-semibold text-white shadow-glass transition hover:opacity-90 disabled:opacity-50"
+        >
+          {busy ? "Saving…" : "Add ground report"}
+        </button>
+      </div>
 
-      {error && <p className="text-sm text-red-600">{error}</p>}
+      {error && <p className="text-sm text-red-700">{error}</p>}
       {result && (
-        <div className="rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-slate-700">
+        <div className="glass-card sheen border-green-300/50 p-3 text-sm text-ink">
           ✓ Saved. Sentiment: <strong>{result.sentiment_label}</strong>
           {result.inferred_city && (
             <>
@@ -62,7 +63,7 @@ export function GroundInput() {
               · city: <strong>{result.inferred_city}</strong>
             </>
           )}
-          {result.topics.length > 0 && <> · topics: {result.topics.join(", ")}</>}
+          {result.topics.length > 0 && <> · topics: {result.topics.map((t) => `#${t}`).join(" ")}</>}
         </div>
       )}
     </div>
