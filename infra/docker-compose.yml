@@ -1,0 +1,70 @@
+# OPTIONAL deployment artifact — NOT the local dev path on this machine
+# (we run natively via infra/scripts/start-dev.ps1 to stay light).
+# Kept so CI / a server can bring the full stack up with healthchecks.
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: civicpulse
+      POSTGRES_PASSWORD: civicpulse
+      POSTGRES_DB: civicpulse
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U civicpulse"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: ../backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    env_file: ["../.env"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://civicpulse:civicpulse@postgres:5432/civicpulse
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    ports: ["8000:8000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build: ../backend
+    command: celery -A app.workers.celery_app:celery_app worker -l info
+    env_file: ["../.env"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://civicpulse:civicpulse@postgres:5432/civicpulse
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  beat:
+    build: ../backend
+    command: celery -A app.workers.celery_app:celery_app beat -l info
+    env_file: ["../.env"]
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      redis: { condition: service_healthy }
+
+volumes:
+  pgdata:
