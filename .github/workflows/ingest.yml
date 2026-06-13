@@ -1,0 +1,25 @@
+name: CivicPulse ingestion cron
+
+# Replaces Celery beat in the free deployment: every 30 minutes (and on manual run)
+# this calls the protected ingestion endpoint, which runs one full ingest_all() cycle.
+on:
+  schedule:
+    - cron: "*/30 * * * *" # every 30 min (UTC). GitHub may delay under load — that's fine.
+  workflow_dispatch: {} # lets you trigger a run by hand from the Actions tab
+
+jobs:
+  trigger-ingestion:
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /api/internal/run-ingestion
+        env:
+          API_BASE: ${{ vars.API_BASE_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          BASE="${API_BASE:-https://instadashb.onrender.com}"
+          echo "Triggering ingestion at $BASE (first call may cold-start the free dyno ~50s)…"
+          code=$(curl -sS -m 180 -o /tmp/resp.json -w "%{http_code}" \
+            -X POST "$BASE/api/internal/run-ingestion" \
+            -H "X-Cron-Secret: $CRON_SECRET")
+          echo "HTTP $code"; cat /tmp/resp.json; echo
+          test "$code" = "200"

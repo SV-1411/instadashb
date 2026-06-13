@@ -1,86 +1,126 @@
-# Deploying CivicPulse
+# Deploying CivicPulse — FREE, no Docker
 
-CivicPulse has 5 runtime pieces: **API** (FastAPI), **worker** (Celery), **beat** (Celery
-scheduler), **PostgreSQL**, **Redis**. The frontend is a static React build.
+CivicPulse normally has 5 runtime pieces: **API** (FastAPI), **worker** + **beat** (Celery),
+**PostgreSQL**, **Redis**. The blocker for a free deployment is the two always-on Celery
+processes — free tiers sleep them, and Upstash's free Redis quota gets burned by an idle
+worker polling the broker.
 
-## TL;DR — your chosen stack: Vercel + Render + Supabase
-- **Frontend** → **Vercel** (free).
-- **Backend** (api + worker + beat) → **Render** (3 services).
-- **PostgreSQL** → **Supabase** (managed Postgres; free tier fine to start).
-- **Redis** → **Upstash** (free tier). ⚠️ **Supabase has no Redis**, and Celery needs a Redis broker,
-  so Redis lives on Upstash (or Render Key Value) — the one piece Supabase can't cover.
-- **You do NOT need AWS/GCP.**
+**This deployment removes Celery entirely.** `ingest_all()` (in `app/workers/tasks.py`) is a
+plain function that runs the whole pipeline in one call, so instead of Celery beat we expose a
+protected endpoint `POST /api/internal/run-ingestion` and have an **external cron (GitHub
+Actions)** hit it every 30 minutes. That collapses the stack to **3 free pieces**:
 
-### Wiring the chosen stack
-1. **Supabase**: create project → Settings → Database → copy the connection string and use it as
-   `DATABASE_URL` with the psycopg driver + SSL, e.g.
-   `postgresql+psycopg://postgres.<ref>:<pwd>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require`.
-   Run `alembic upgrade head` against it once.
-2. **Upstash**: create a Redis DB → copy the `rediss://...` URL → set `REDIS_URL`,
-   `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND` to it (Upstash is TLS, `rediss://`).
-3. **Render**: 3 services (api/worker/beat) from `backend/` with the env vars below.
-4. **Vercel**: import `frontend/`, set `VITE_API_BASE_URL=https://<your-render-api>.onrender.com`.
-
-> ⚠️ **Vercel can host ONLY the frontend.** It's serverless and cannot run the long-lived Celery
-> worker/beat. Don't try to put the backend there.
-
----
-
-## Option A — Render (recommended)
-
-Create these from the Render dashboard (or a `render.yaml` blueprint):
-
-| Render service | Type | Start command |
+| Piece | Host | Free terms |
 |---|---|---|
-| `civicpulse-api` | Web Service | `uvicorn app.main:app --host 0.0.0.0 --port $PORT` |
-| `civicpulse-worker` | Background Worker | `celery -A app.workers.celery_app:celery_app worker -l info` |
-| `civicpulse-beat` | Background Worker | `celery -A app.workers.celery_app:celery_app beat -l info` |
-| `civicpulse-db` | PostgreSQL | (managed) |
-| `civicpulse-redis` | Key Value (Redis) | (managed) |
+| **Frontend** (static React) | **Vercel** | Free, auto-detects Vite, free HTTPS |
+| **API** (FastAPI) | **Render** free Web Service | 750 hrs/mo; sleeps after 15 min idle (~50s cold start) |
+| **Postgres** | **Neon** free | 0.5 GB, instant resume |
+| **Redis** | **Upstash** free | used ONLY as cache + AI-brief store (low volume), NOT a Celery broker |
+| **Scheduler** (replaces beat) | **GitHub Actions** | free cron POSTs the ingestion endpoint every 30 min |
 
-- Root dir = `backend/`. Build = `pip install -e .`.
-- **Run migrations on deploy:** set the API service's pre-deploy command to `alembic upgrade head`.
-- Set env vars (below) on all three backend services. Render injects `DATABASE_URL`/`REDIS_URL`
-  when you attach the datastores — point `CELERY_BROKER_URL`/`CELERY_RESULT_BACKEND` at the Redis URL.
-- Frontend: a **Static Site** (root `frontend/`, build `npm run build`, publish `dist/`), with
-  `VITE_API_BASE_URL=https://civicpulse-api.onrender.com`. Or deploy `frontend/` to **Vercel**.
-
-Cost: free tier sleeps (breaks the 30-min worker), so use the paid instances (~$7 each → ~$20–35/mo).
-
-## Option B — VPS (cheapest)
-1. Point a domain at the VPS, install Docker.
-2. Put real values in `.env`, then `docker compose -f infra/docker-compose.yml up -d`.
-3. Put **Caddy or Nginx** in front for HTTPS (Let's Encrypt). Serve the built `frontend/dist`.
-4. Run `alembic upgrade head` once (the api container can do it on start).
-
-## Option C — Railway / Fly.io
-Same shape as Render: one service per process (api/worker/beat) + managed Postgres + Redis.
+No AWS/GCP. No Docker. $0/month.
 
 ---
 
-## Go-live checklist (env vars on the backend host)
-Generate a **fresh** `FERNET_KEY` for production (don't reuse the dev one):
+## 0. The architecture change (already in the code)
+- `app/api/internal.py` — `POST /api/internal/run-ingestion`, guarded by header
+  `X-Cron-Secret: <CRON_SECRET>`. Runs `ingest_all()` synchronously and returns `{processed}`.
+- `.github/workflows/ingest.yml` — cron (`*/30 * * * *`) + manual trigger; curls that endpoint.
+- `render.yaml` — single web service blueprint (no worker, no beat).
+- `backend/requirements.txt` — so Render's default `pip install -r requirements.txt` works.
+- CORS now reads `CORS_ALLOW_ORIGINS` (your Vercel URL) on top of localhost.
+
+The read API still never calls an external service (architecture rule 1 intact).
+
+---
+
+## 1. Neon (Postgres)
+1. Create a project → copy the connection string.
+2. Convert it to the psycopg driver CivicPulse uses (add `+psycopg`, keep `sslmode=require`):
+   ```
+   postgresql+psycopg://<user>:<pwd>@<host>.neon.tech/neondb?sslmode=require
+   ```
+   This is your `DATABASE_URL`.
+3. **Create the tables + demo data** (run once, from your machine — see §6).
+
+## 2. Upstash (Redis)
+- In the Upstash console open your database → **Connect → "Redis" tab** (NOT "REST API").
+- Copy the TLS Redis-protocol URL:  `rediss://default:<password>@<host>.upstash.io:6379`
+- That is your `REDIS_URL`. ⚠️ The `UPSTASH_REDIS_REST_URL`/`REST_TOKEN` pair is a *different*
+  HTTP interface and will NOT work with `redis-py` — you need the `rediss://` URL.
+
+## 3. Render (API)
+- New **Web Service** from the GitHub repo. **Root Directory:** `backend`.
+- **Build:** `pip install -r requirements.txt`  (Render's auto-detected default — correct).
+- **Start:** `alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+  (runs idempotent migrations on each boot, then serves).
+- **Health Check Path:** `/health`.
+- **Environment** (Environment tab) — see the checklist in §5.
+
+## 4. Vercel (Frontend)
+- Import the repo. **Root Directory:** `frontend`. Framework preset: **Vite** (auto).
+- Build `npm run build`, output `dist` (also in `frontend/vercel.json`, incl. SPA rewrite).
+- Env var **`VITE_API_BASE_URL`** = `https://<your-render-app>.onrender.com`
+  (a default is baked into `frontend/.env.production`; the dashboard value overrides it).
+
+## 5. GitHub Actions (the cron that replaces Celery beat)
+The workflow `.github/workflows/ingest.yml` is already in the repo. To make it run:
+1. On GitHub: **Settings → Secrets and variables → Actions**.
+2. Add a **secret** named `CRON_SECRET` = the same value you set on Render.
+3. (Optional) Add a **variable** named `API_BASE_URL` = your Render URL
+   (it defaults to `https://instadashb.onrender.com` if unset).
+4. Trigger it once by hand: **Actions tab → "CivicPulse ingestion cron" → Run workflow**.
+   After that it runs automatically every 30 min. (GitHub may delay scheduled runs a few
+   minutes under load — fine for a 30-min cadence. The first call also wakes the sleeping dyno.)
+
+## 6. Run migrations + seed demo data against Neon (the "where do I run this?")
+From **your machine**, in `backend/` with the venv active, point `DATABASE_URL` at Neon and run:
+```powershell
+$env:DATABASE_URL = "postgresql+psycopg://<user>:<pwd>@<host>.neon.tech/neondb?sslmode=require"
+$env:FERNET_KEY   = "<your-prod-fernet-key>"
+alembic upgrade head                 # creates the 5 tables
+python -m app.scripts.seed_demo      # loads "Demo Netaji" — 8 days of rich data + a spike
+```
+`alembic upgrade head` also runs automatically on every Render boot, so the seed is the only
+truly manual step. Re-running `seed_demo` is safe (it upserts the demo tenant).
+
+> ⚠️ **Neon pooler gotcha for migrations:** run `alembic upgrade head` against Neon's
+> **direct (non-pooled)** endpoint — drop the `-pooler` segment from the host, e.g.
+> `ep-xxxx-pooler.c-3.us-east-1...` → `ep-xxxx.c-3.us-east-1...`. DDL through the pooled
+> endpoint (PgBouncer) can hang. The pooled URL is correct for the running app/`DATABASE_URL`;
+> use direct only for the one-time migration + seed.
+
+---
+
+## Go-live env-var checklist (set on Render)
+Generate a **fresh** Fernet key for prod (don't reuse the dev one):
 ```
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 Required:
+- `DATABASE_URL` — Neon psycopg URL (§1)
+- `REDIS_URL` — Upstash `rediss://` URL (§2)
 - `FERNET_KEY` — fresh
-- `DATABASE_URL`, `REDIS_URL`, `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`
-- `USE_FAKE_CLIENTS=false`
-- `META_APP_ID`, `META_APP_SECRET`, `META_OAUTH_REDIRECT_URI=https://<your-api-domain>/api/auth/meta/callback`
-- `GOOGLE_NL_API_KEY` (+ `NLP_SAMPLE_RATE`)
-- `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` (a current `:free` model)
-- `SCRAPER_PROVIDER`/`SCRAPER_API_KEY`/`SCRAPER_QUERIES` (optional), `SOCIALDATA_API_KEY`/`X_QUERIES` (optional)
-- `FCM_SERVICE_ACCOUNT_JSON` (for real push)
-- Frontend: `VITE_API_BASE_URL=https://<your-api-domain>`
+- `CRON_SECRET` — random string; also added as a GitHub Actions secret (§5).
+  Generate with `python -c "import secrets; print(secrets.token_urlsafe(32))"`
+- `CORS_ALLOW_ORIGINS` — your Vercel URL, e.g. `https://instadashb.vercel.app`
+- `USE_FAKE_CLIENTS=true` — full offline demo, no paid keys. Flip to `false` only after
+  configuring real credentials below.
 
-Also:
-- **Meta App** must be in **Live** mode + pass **App Review** for the IG permissions (Development mode
-  only works for your own/test accounts).
-- The OAuth redirect URI in the Meta App must EXACTLY match `META_OAUTH_REDIRECT_URI` (HTTPS, public).
-- HTTPS is assumed end-to-end (Render/Vercel give it free; on a VPS use Caddy/Nginx + Let's Encrypt).
-- Lock CORS in `app/main.py` to your frontend domain before going live.
+Optional (only when going past the demo):
+- `OPENROUTER_API_KEY` (+ `OPENROUTER_MODEL` = a current `:free` model) — real AI Brief/topics.
+- `META_APP_ID`/`META_APP_SECRET`/`META_OAUTH_REDIRECT_URI` + `META_SOURCE=instagram_login` —
+  connect one real Instagram account (free; the no-Facebook-Page path — see `CONNECT_INSTAGRAM.md`).
+- `GOOGLE_NL_API_KEY`, `SOCIALDATA_API_KEY`/`X_QUERIES`, `SCRAPER_*` — paid data sources.
+- `FCM_SERVICE_ACCOUNT_JSON` — real push.
 
-## What's still needed before a real launch (tracked in FLAWS_AND_FIXES.md)
-- Real FCM send (WP5 live), WP4 India map, WP10 geo/misinfo, WP11 reports/admin.
-- API rate limiting + tighter CORS; Sentry/error tracking; a "Meta token expired" runbook.
+## Free-tier trade-offs (accept these)
+- **Cold start ~50s** after idle; the 30-min cron + first user hit wake it. Add a 10-min
+  `/health` ping if you want it always warm (still within the 750-hr budget).
+- **Synchronous ingestion** runs inside the cron's HTTP request — seconds for the demo + a
+  couple of accounts. At real scale, move back to a Celery worker (paid).
+
+## Paid alternative (if you outgrow free)
+Render paid: add `civicpulse-worker` (`celery -A app.workers.celery_app:celery_app worker -l info`)
+and `civicpulse-beat` (`... beat -l info`) as Background Workers, point `CELERY_BROKER_URL`/
+`CELERY_RESULT_BACKEND` at the Redis URL, and disable the GitHub Actions cron. ~$7/service.

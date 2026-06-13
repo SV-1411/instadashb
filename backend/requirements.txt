@@ -1,0 +1,18 @@
+# Runtime dependencies for deployment (Render auto-detects this file).
+# Mirrors the [project].dependencies in pyproject.toml. Dev/test tools (pytest,
+# ruff, black, mypy, respx, fakeredis) are intentionally excluded — install those
+# locally with:  pip install -e ".[dev]"
+fastapi>=0.111
+uvicorn[standard]>=0.30
+sqlalchemy>=2.0.30
+psycopg[binary]>=3.2
+alembic>=1.13
+pydantic>=2.7
+pydantic-settings>=2.3
+celery[redis]>=5.4
+redis>=5.0
+cryptography>=42.0
+httpx>=0.27
+tenacity>=8.4
+structlog>=24.1
+python-dotenv>=1.0

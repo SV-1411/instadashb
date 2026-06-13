@@ -1,0 +1,36 @@
+# Render blueprint for the FREE, worker-less CivicPulse deployment.
+# ONE web service (the FastAPI API). No Celery worker/beat — ingestion is driven by
+# an external cron (GitHub Actions) hitting /api/internal/run-ingestion. Postgres lives
+# on Neon, Redis on Upstash. See docs/DEPLOY.md.
+#
+# Secrets (sync:false) are NOT stored here — set them in the Render dashboard.
+services:
+  - type: web
+    name: instadashb
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    # Run idempotent migrations on every boot, then serve. ($PORT is injected by Render.)
+    startCommand: alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: USE_FAKE_CLIENTS
+        value: "true"            # full demo with no paid API keys; flip to false for real IG
+      - key: CORS_ALLOW_ORIGINS
+        value: https://instadashb.vercel.app
+      - key: INGESTION_INTERVAL_MINUTES
+        value: "30"
+      # --- secrets: set these in the dashboard (Environment tab) ---
+      - key: DATABASE_URL          # Neon: postgresql+psycopg://...:...@...neon.tech/neondb?sslmode=require
+        sync: false
+      - key: REDIS_URL             # Upstash Redis-protocol URL: rediss://default:<pwd>@<host>:6379
+        sync: false
+      - key: FERNET_KEY            # fresh key — see docs/DEPLOY.md
+        sync: false
+      - key: CRON_SECRET           # shared secret for the GitHub Actions cron
+        sync: false
+      - key: OPENROUTER_API_KEY    # optional: real AI Brief / topic extraction (free models)
+        sync: false

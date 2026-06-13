@@ -28,6 +28,16 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     timezone: str = "Asia/Kolkata"
 
+    # Extra allowed frontend origins (comma-separated) added on top of localhost — set
+    # this to your deployed frontend URL in production, e.g. https://instadashb.vercel.app
+    cors_allow_origins: str = ""
+
+    # Shared secret protecting the cron-triggered ingestion endpoint. In the free,
+    # worker-less deployment an external scheduler (GitHub Actions / cron-job.org) calls
+    # POST /api/internal/run-ingestion with header `X-Cron-Secret: <this>` instead of
+    # Celery beat. Leave empty to keep that endpoint disabled (503).
+    cron_secret: SecretStr = Field(default=SecretStr(""))
+
     # Database
     database_url: str = "postgresql+psycopg://civicpulse:civicpulse@localhost:5433/civicpulse"
     alembic_database_url: str | None = None
